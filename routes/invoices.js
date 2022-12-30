@@ -2,11 +2,11 @@ const express = require("express");
 const router = new express.Router();
 const db = require("../db");
 const ExpressError = require("../expressError");
-const { validValueCheck } = require("../helpers");
+const { validValueCheck, getInvoice } = require("../helpers");
 
 router.get("/", async function (req, res, next) {
   try {
-    const result = await db.query("SELECT * FROM invoices");
+    const result = await db.query("SELECT id, comp_code FROM invoices");
     return res.json({ invoices: result.rows });
   } catch (err) {
     return next(err);
@@ -14,30 +14,27 @@ router.get("/", async function (req, res, next) {
 });
 
 router.get("/:id", async function (req, res, next) {
-  try {
-    const result = await db.query("SELECT * FROM invoices WHERE id = $1", [
-      req.params.id,
-    ]);
-    if (result.rows.length === 0) throw new ExpressError(`There is no invoice with ID '${req.params.code}'`, 404);
-    return res.json({ company: result.rows[0] });
-  } catch (err) {
-    return next(err);
+  const result = await getInvoice(req.params.id);
+  if (result instanceof Error) {
+    return next(result);
   }
+  return res.json({ invoice: result });
 });
 
 router.post("/", async function (req, res, next) {
   try {
     let { comp_code, amt } = req.body;
-    if (validValueCheck([comp_code, amt])) throw new ExpressError('An amount and comany code must be provided')
+    if (validValueCheck([comp_code, amt]))
+      throw new ExpressError("An amount and comany code must be provided");
 
     const result = await db.query(
       `INSERT INTO invoices (comp_code, amt) 
            VALUES ($1, $2) 
-           RETURNING *`,
+           RETURNING id, comp_code, amt, paid, add_date, paid_date`,
       [comp_code, amt]
     );
 
-    return res.status(201).json({ company: result.rows[0] });
+    return res.status(201).json({ invoice: result.rows[0] });
   } catch (err) {
     return next(err);
   }
@@ -45,22 +42,33 @@ router.post("/", async function (req, res, next) {
 
 router.put("/:id", async function (req, res, next) {
   try {
-    if ("id" in req.body) throw new ExpressError("Not allowed", 400)
-    let { amt } = req.body;
-    if (validValueCheck([amt])) throw new ExpressError('An amount must be provided')
+    let { amt, paid } = req.body;
+    if (validValueCheck([amt, paid])) throw new ExpressError("An amount and paid status must be provided");
+    let currInvoice = await getInvoice(req.params.id);
+    if (currInvoice instanceof Error) throw currInvoice;
+    // let currInvoice = currInvoiceRes.rows[0]
+    let paidDate
+    if (!currInvoice.paid_date && paid) {
+      paidDate = new Date()
+    } else if (!paid){
+        paidDate = null
+      } else {
+        paidDate = currInvoice.paid_date
+      }
+
     const result = await db.query(
       `UPDATE invoices 
-             SET amt=$1
-             WHERE id = $2
+             SET amt=$1, paid=$2, paid_date=$3
+             WHERE id = $4
              RETURNING *`,
-      [amt, req.params.id]
+      [amt, paid, paidDate, req.params.id]
     );
 
-    if (result.rows.length === 0) throw new ExpressError(`There is no invoice with ID '${req.params.id}'`, 404);
-    return res.json({ company: result.rows[0] });
-  } catch (err) {
-    return next(err);
+    return res.json({ invoice: result.rows[0] });
+  } catch (err){
+    return next(err)
   }
+
 });
 
 router.delete("/:id", async function (req, res, next) {
@@ -69,7 +77,11 @@ router.delete("/:id", async function (req, res, next) {
       "DELETE FROM invoices WHERE id=$1 RETURNING id",
       [req.params.id]
     );
-    if (result.rows.length === 0) throw new ExpressError(`There is no invoice with ID '${req.params.id}'`, 404);
+    if (result.rows.length === 0)
+      throw new ExpressError(
+        `There is no invoice with ID '${req.params.id}'`,
+        404
+      );
     return res.json({ status: "deleted" });
   } catch (err) {
     return next(err);
